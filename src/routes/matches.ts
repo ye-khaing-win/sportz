@@ -1,0 +1,62 @@
+import { Router } from 'express';
+import { createMatchSchema, listMatchesQuerySchema } from '../validation/matches.js';
+import {db} from '../db/db.js'
+import { matches } from '../db/schema.js';
+import { getMatchStatus } from '../utils/match-status.js';
+
+export const matchRouter: Router = Router();
+
+const MAX_LIMIT = 100;
+
+matchRouter.get('/', async (req, res) => {
+    const parsed = listMatchesQuerySchema.safeParse(req.query)
+
+    if (!parsed.success) {
+        res.status(400).json({ errors: "Invalid payload", details: parsed.error.issues });
+        return;
+    }
+
+    const limit = Math.min(parsed.data.limit ?? 50, MAX_LIMIT);
+
+    try {
+        const data = await db.select().from(matches).orderBy(matches.createdAt).limit(limit);
+        return res.status(200).json({ data });
+    } catch(error) {
+        return res.status(500).json({ errors: "Failed to fetch matches", details: JSON.stringify(error) });
+    }
+});
+
+
+matchRouter.post('/', async (req, res) => {
+    const parsed = createMatchSchema.safeParse(req.body);
+
+    if (!parsed.success) {
+        res.status(400).json({ errors: "Invalid payload", details: parsed.error.issues });
+        return;
+    }
+
+    const {data: {startTime, endTime, homeScore, awayScore}} = parsed;
+
+    
+    try {
+        const [event] = await db.insert(matches).values({
+            ...parsed.data,
+            startTime: new Date(startTime),
+            endTime: new Date(endTime),
+            homeScore,
+            awayScore,
+            status: (getMatchStatus(new Date(startTime), new Date(endTime)) ?? 'scheduled') as 'scheduled' | 'live' | 'finished'
+        }).returning();
+
+        if (res.app.locals.broadcastMatchCreated) {
+            res.app.locals.broadcastMatchCreated(event);
+        }
+
+        return res.status(201).json({data: event})
+        
+    } catch (error) {
+        res.status(500).json({ errors: "Failed to create match", details: JSON.stringify(error) });
+    }
+
+    res.status(200).json({ message: 'Match created' });
+});
